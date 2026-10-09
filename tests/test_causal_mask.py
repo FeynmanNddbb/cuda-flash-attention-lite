@@ -1,17 +1,20 @@
 import torch
-import torch.nn.functional as F
 
 from conftest import requires_cuda_extension
 from flash_attention import flash_attention
+from traditional_attention import traditional_attention
 
 
 @requires_cuda_extension
-def test_causal_mask_matches_reference_for_non_multiple_of_tile():
+def test_causal_mask_matches_traditional_reference_for_non_multiple_of_tile():
     torch.manual_seed(7)
     shape = (1, 1, 35, 48)
-    q, k, v = [torch.randn(shape, device="cuda", dtype=torch.float32) for _ in range(3)]
+    q, k, v = [
+        torch.randn(shape, device="cuda", dtype=torch.float32)
+        for _ in range(3)
+    ]
     actual = flash_attention(q.contiguous(), k.contiguous(), v.contiguous(), causal=True)
-    expected = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+    expected = traditional_attention(q, k, v, causal=True)
     torch.testing.assert_close(actual, expected, atol=2e-4, rtol=2e-4)
 
 
