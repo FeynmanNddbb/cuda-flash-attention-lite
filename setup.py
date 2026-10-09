@@ -5,7 +5,7 @@ setup(
     name="cuda-flash-attention-lite",
     version="0.1.0",
     description="Educational CUDA C++ FlashAttention forward kernel",
-    py_modules=["flash_attention"],
+    py_modules=["flash_attention", "traditional_attention"],
     ext_modules=[
         CUDAExtension(
             name="flash_attention_cuda",
