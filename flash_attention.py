@@ -15,6 +15,6 @@ def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: b
     if flash_attention_cuda is None:
         raise RuntimeError(
             "flash_attention_cuda extension is not built. Run python -m pip install -e . "
-            "with CUDA-enabled PyTorch and nvcc available."
+            "--no-build-isolation with CUDA-enabled PyTorch and nvcc available."
         ) from _IMPORT_ERROR
     return flash_attention_cuda.forward(q, k, v, causal)
