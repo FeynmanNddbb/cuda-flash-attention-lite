@@ -1,380 +1,284 @@
-<div align="center">
-
 # CUDA FlashAttention Lite
 
-**从传统 Attention 到分块 CUDA Attention：一个可编译、可验证、可测量的 AI Infra 学习项目**
+> 使用 CUDA C++ 实现简化版 FlashAttention 前向算子，并通过传统 Attention 进行正确性与性能对比。
 
-<p>
-  <img src="https://img.shields.io/badge/CUDA-C%2B%2B-76B900?logo=nvidia&logoColor=white" alt="CUDA C++" />
-  <img src="https://img.shields.io/badge/PyTorch-CUDA%20Extension-EE4C2C?logo=pytorch&logoColor=white" alt="PyTorch CUDA Extension" />
-  <img src="https://img.shields.io/badge/Focus-FlashAttention-blue" alt="FlashAttention" />
-  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License" />
-</p>
+[![CUDA](https://img.shields.io/badge/CUDA-C%2B%2B-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-toolkit)
+[![PyTorch](https://img.shields.io/badge/PyTorch-CUDA%20Extension-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-<p>
-  <a href="#项目亮点">项目亮点</a> ·
-  <a href="#原理概览">原理概览</a> ·
-  <a href="#快速开始">快速开始</a> ·
-  <a href="#正确性测试">正确性测试</a> ·
-  <a href="#性能对比">性能对比</a> ·
-  <a href="#已知限制">已知限制</a>
-</p>
+## 项目介绍
 
-</div>
+传统 Attention 通常按以下步骤计算：
 
----
+1. 计算注意力分数：QK 的转置乘积，再除以 sqrt(D)。
+2. 可选地应用因果掩码（Causal Mask）。
+3. 对分数执行 Softmax。
+4. 将概率矩阵与 V 相乘，得到最终输出。
 
-## 项目简介
+其中，完整注意力分数矩阵的形状为 [B, H, S, S]。当序列长度 S 增长时，这个中间矩阵的空间开销会按 S 的平方增长。
 
-在标准 Transformer Attention 中，输入张量 \(Q,K,V\) 的形状通常为 \([B,H,S,D]\)。传统实现先计算完整的注意力分数矩阵：
+本项目使用 CUDA C++ 实现一个便于学习的 FlashAttention 前向算子。它按 tile 分块读取 K 和 V，将数据暂存在共享内存中，并使用 Online Softmax 逐块更新归一化统计量与输出累加值，避免显式保存完整的注意力分数矩阵。
 
-\[
-\operatorname{Attention}(Q,K,V)
-=\operatorname{softmax}\left(\frac{QK^\mathsf{T}}{\sqrt{D}}\right)V
-\]
-
-其中 \(S\) 为序列长度。显式构建的注意力分数矩阵具有 \(S\times S\) 的空间规模，序列越长，中间张量的内存开销越大。
-
-本项目使用 **CUDA C++ + PyTorch CUDA Extension** 实现一个简化版 FlashAttention 前向算子，通过 K/V 分块加载、共享内存复用和 Online Softmax，在不显式保存完整注意力分数矩阵的情况下计算输出。项目同时提供传统 Attention 参考实现，用于对比数值正确性、执行延迟和 PyTorch 显存分配增量。
-
-> **项目定位：** 面向 CUDA、AI Infra 和大模型推理优化入门者的可读型实现。它帮助理解 FlashAttention 的核心思路，不是生产级 FlashAttention 的替代品。仓库当前不预设加速比；性能结论必须由目标 GPU 上的实测数据支撑。
+项目同时提供传统 Attention 参考实现，以及正确性测试、性能对比和 JSON 结果导出脚本。
 
 ## 项目亮点
 
-<table>
-  <tr>
-    <td width="50%">
-      <h3>01 · 内存优化思路</h3>
-      不物化完整的 \(S\times S\) 分数矩阵，按 tile 处理 K/V，并使用 Online Softmax 持续更新结果。
-    </td>
-    <td width="50%">
-      <h3>02 · CUDA C++ 实践</h3>
-      从 PyTorch Tensor、C++ 扩展绑定到 CUDA Kernel，串起一个可构建的算子工程。
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <h3>03 · 正确性有参照</h3>
-      用独立的传统 Attention 实现做对照，覆盖 FP32、FP16、因果掩码和非 tile 对齐的序列长度。
-    </td>
-    <td width="50%">
-      <h3>04 · 性能可复现</h3>
-      CUDA Event 计时，输出最大绝对误差、平均延迟、加速比、显存分配增量，并支持保存 JSON。
-    </td>
-  </tr>
-</table>
+| 方向 | 实现内容 | 能验证什么 |
+|---|---|---|
+| CUDA Kernel | 分块加载 K/V、共享内存复用 | 理解数据搬运与线程协作 |
+| Online Softmax | 逐 tile 更新最大值、分母和输出累加值 | 避免保存完整分数矩阵 |
+| Causal Mask | 屏蔽当前位置之后的 Key | 检查因果注意力语义 |
+| 正确性测试 | 与传统 Attention 的显式计算结果对比 | 检查数值误差与边界情况 |
+| 性能测试 | CUDA Event 计时并比较两种实现 | 得到延迟、加速比和显存分配数据 |
+| 性能分析 | 提供 Nsight Compute / Nsight Systems 命令 | 进一步定位 Kernel 瓶颈 |
 
-### 当前实现范围
+## 实现原理
 
-- CUDA 前向算子，支持输入形状 \([B,H,S,D]\)，且 Q/K/V 形状一致。
-- 支持 FP32 和 FP16 输入；自定义 Kernel 的分数、Softmax 统计量和累加使用 FP32。
-- 支持可选 Causal Mask：位置 \(i\) 只能关注 \(j\leq i\) 的 token。
-- K/V tile 大小为 32，使用共享内存暂存 tile。
-- 使用 CUDA Event 做重复测量，提供传统 Attention 与自定义 Kernel 的性能对比程序。
-- 暂不支持反向传播、Dropout、GQA/MQA 和不等长 Q/K/V。
+### 传统 Attention
 
-## 原理概览
+传统参考实现显式计算整个分数矩阵：
 
-### 传统 Attention：显式计算中间矩阵
+~~~python
+scores = Q @ K.transpose(-2, -1)
+scores = scores / sqrt(head_dim)
+scores = apply_causal_mask_if_needed(scores)
+probabilities = softmax(scores, dim=-1)
+output = probabilities @ V
+~~~
 
-\`\`\`text
-Q, K, V
-   │
-   ▼
-scores = Q × Kᵀ / √D        → 形状 [B, H, S, S]
-   │
-   ▼
-可选 Causal Mask
-   │
-   ▼
-softmax(scores)
-   │
-   ▼
-output = probabilities × V
-\`\`\`
+这份实现位于 **traditional_attention.py**，用于作为本项目的数值正确性参考和性能 baseline。
 
-参考实现位于 \`traditional_attention.py\`。它会显式创建完整分数矩阵和 Softmax 概率矩阵，作为本项目的正确性与性能 baseline。
+### 简化版 FlashAttention
 
-### 简化版 FlashAttention：分块 + Online Softmax
+自定义 CUDA Kernel 的主要步骤如下：
 
-\`\`\`text
-             Q 的一行
-                │
-                ▼
-        按 tile 遍历 K / V
-                │
-                ▼
-       共享内存加载当前 tile
-                │
-                ▼
-       计算当前 tile 的分数
-                │
-                ▼
-       应用 Causal Mask（可选）
-                │
-                ▼
-       Online Softmax 更新状态
-       ┌────────────────────┐
-       │ 当前最大值 m        │
-       │ 归一化分母 l        │
-       │ 加权输出累加器 o    │
-       └────────────────────┘
-                │
-          继续下一个 tile
-                │
-                ▼
-             输出 o / l
-\`\`\`
+1. 一个 CUDA Block 负责一个 Query 行。
+2. 多个线程协作，将当前 K/V tile 加载到共享内存。
+3. 计算当前 tile 的注意力分数，并按需应用 Causal Mask。
+4. 使用 Online Softmax 更新运行最大值、归一化分母和输出累加值。
+5. 处理后续 tile，最终将累加结果除以归一化分母。
 
-Online Softmax 的核心是：当新 tile 到来时，更新运行最大值 \(m\)、归一化分母 \(l\) 和加权输出累加器 \(o\)，不需要保存全部历史分数。
+Online Softmax 的更新逻辑可以概括为：
 
-\`\`\`text
+~~~text
 m_new = max(m, max(scores))
 alpha = exp(m - m_new)
 p     = exp(scores - m_new)
 l_new = alpha * l + sum(p)
 o_new = alpha * o + sum(p * V)
 output = o / l
-\`\`\`
+~~~
 
-该实现主要为了清晰展示算法流程。当前 Kernel 每个 CUDA Block 负责一个 query 行，尚未针对 Tensor Core、occupancy、向量化访存和多 query 行复用进行充分优化。
+这里的 m 是运行最大值，l 是归一化分母，o 是未归一化的输出累加值。实际代码对分数、Softmax 统计量和输出累加使用 FP32，再将结果转换回输入 dtype。
+
+> 当前实现的目标是展示核心算法，而不是追求生产级性能。每个 Block 只处理一个 Query 行，点积计算仍有逐维循环，暂未针对 Tensor Core、occupancy 和多 Query 行复用进行充分优化。
 
 ## 项目结构
 
-\`\`\`text
+~~~text
 cuda-flash-attention-lite/
 ├── csrc/
-│   ├── flash_attention.cpp       # PyTorch 扩展绑定、输入校验
+│   ├── flash_attention.cpp       # PyTorch 扩展绑定与输入检查
 │   └── flash_attention.cu        # CUDA 前向 Kernel
 ├── include/
 │   └── flash_attention.h         # C++ 接口
 ├── tests/
-│   ├── conftest.py               # CUDA 扩展测试条件
-│   ├── test_correctness.py       # 传统 Attention 数值对比
-│   └── test_causal_mask.py       # Causal Mask 边界测试
+│   ├── conftest.py               # 测试环境检查
+│   ├── test_correctness.py       # 数值正确性对比
+│   └── test_causal_mask.py       # 因果掩码边界测试
 ├── benchmarks/
-│   └── benchmark.py              # 正确性检查与性能对比
+│   └── benchmark.py              # 传统 Attention 与自定义 Kernel 对比
 ├── docs/
-│   ├── implementation.md         # 算法与 Kernel 设计说明
-│   └── profiling-and-results.md  # 测试、剖析与结果记录指南
+│   ├── implementation.md         # 算法与 Kernel 说明
+│   └── profiling-and-results.md  # 测试和性能分析指南
 ├── scripts/
-│   ├── run_tests.sh              # 编译并运行正确性测试
-│   └── run_benchmark.sh          # 基准测试快捷脚本
+│   ├── run_tests.sh              # 构建并执行测试
+│   └── run_benchmark.sh          # 性能测试快捷脚本
 ├── flash_attention.py            # 自定义算子的 Python 入口
 ├── traditional_attention.py      # 传统 Attention baseline
 ├── setup.py                      # CUDA Extension 构建配置
 └── README.md
-\`\`\`
+~~~
 
 ## 快速开始
 
-### 1. 环境要求
+### 1. 检查环境
 
-建议在 Linux + NVIDIA GPU 环境中运行：
+建议使用 Linux 和 NVIDIA GPU。需要安装兼容的 NVIDIA Driver、CUDA Toolkit、Python 3.10+，以及 CUDA 版本的 PyTorch。
 
-| 组件 | 要求 |
-|---|---|
-| GPU | 支持 CUDA 的 NVIDIA GPU |
-| NVIDIA Driver | 与本机 CUDA/PyTorch 环境兼容 |
-| CUDA Toolkit | 提供 \`nvcc\`，并与已安装的 PyTorch CUDA 构建兼容 |
-| Python | 3.10+ |
-| PyTorch | CUDA 版本，不是仅 CPU 版本 |
-| C++ 编译器 | 与当前 CUDA Toolkit 兼容 |
+先执行以下命令检查环境：
 
-先检查环境：
-
-\`\`\`bash
+~~~bash
 nvidia-smi
 nvcc --version
+python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA build:', torch.version.cuda); print('CUDA available:', torch.cuda.is_available())"
+~~~
 
-python - <<'PY'
-import torch
-print("PyTorch:", torch.__version__)
-print("PyTorch CUDA build:", torch.version.cuda)
-print("CUDA available:", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("GPU:", torch.cuda.get_device_name(0))
-PY
-\`\`\`
+如果 CUDA 不可用，先检查 PyTorch 是否为 CUDA 版本，以及驱动、CUDA Toolkit 是否与当前环境匹配。
 
-如果 \`torch.cuda.is_available()\` 为 \`False\`，请先解决 PyTorch、驱动或 CUDA 环境问题，再继续编译。
+### 2. 克隆仓库
 
-### 2. 获取项目
-
-\`\`\`bash
+~~~bash
 git clone https://github.com/FeynmanNddbb/cuda-flash-attention-lite.git
 cd cuda-flash-attention-lite
-\`\`\`
+~~~
 
-### 3. 安装测试依赖并编译
+### 3. 安装依赖并编译
 
-先安装与你的驱动、CUDA Toolkit 和 Python 环境匹配的 **CUDA 版 PyTorch**。PyTorch 的安装命令依平台而异，请按本机环境选择合适版本；确认 CUDA 可用后执行：
+先安装与你的驱动和 CUDA 环境匹配的 CUDA 版 PyTorch，然后执行：
 
-\`\`\`bash
+~~~bash
 python -m pip install -r requirements-test.txt
 python -m pip install -e . --no-build-isolation
-\`\`\`
+~~~
 
-如果 CUDA Toolkit 位于非标准路径，必要时设置 \`CUDA_HOME\`。编译失败时，优先检查 \`nvcc\` 是否存在、PyTorch CUDA 版本是否匹配，以及 C++ 编译器是否受当前 Toolkit 支持。
+如果 CUDA Toolkit 安装在非标准路径，可以设置 CUDA_HOME。编译失败时，优先检查 nvcc 是否存在、PyTorch 的 CUDA 构建版本，以及 C++ 编译器兼容性。
 
-### 4. 快速调用
+### 4. 运行一个简单示例
 
-扩展编译完成后，可以在 Python 中调用自定义算子：
+编译成功后，在项目根目录运行：
 
-\`\`\`python
+~~~python
 import torch
 from flash_attention import flash_attention
 
-B, H, S, D = 1, 2, 128, 64
-q = torch.randn(B, H, S, D, device="cuda", dtype=torch.float16)
+batch, heads, seq_len, head_dim = 1, 2, 128, 64
+q = torch.randn(batch, heads, seq_len, head_dim, device="cuda", dtype=torch.float16)
 k = torch.randn_like(q)
 v = torch.randn_like(q)
 
-out = flash_attention(q.contiguous(), k.contiguous(), v.contiguous(), causal=True)
-print("output shape:", tuple(out.shape))
-print("output dtype:", out.dtype)
-\`\`\`
+output = flash_attention(q.contiguous(), k.contiguous(), v.contiguous(), causal=True)
+print("Output shape:", tuple(output.shape))
+print("Output dtype:", output.dtype)
+~~~
 
 ## 正确性测试
 
-先运行测试，再进行正式性能对比：
+执行：
 
-\`\`\`bash
+~~~bash
 pytest -v tests
-\`\`\`
+~~~
 
-也可以使用仓库脚本，该脚本会安装测试依赖、构建扩展并运行测试：
+也可以使用项目脚本，它会安装测试依赖、构建 CUDA 扩展并运行测试：
 
-\`\`\`bash
+~~~bash
 bash scripts/run_tests.sh
-\`\`\`
+~~~
 
-### 测试覆盖
+测试覆盖以下场景：
 
-| 测试项 | 验证内容 |
-|---|---|
-| FP32 / FP16 | 不同 dtype 的输出数值误差 |
-| Causal / Non-causal | 两种注意力模式 |
-| 多种序列长度 | 包括非 32 倍数的序列长度 |
-| Shape / dtype / device | 输出结构与输入约定 |
-| 因果首行 | 第 0 行只能关注第 0 个 Key |
+- FP32 和 FP16 输入。
+- Causal 与 Non-causal 两种模式。
+- 不同序列长度，包括不是 32 倍数的序列长度。
+- 输出形状、dtype、device 检查。
+- 因果掩码首行检查：第 0 个 Query 只能关注第 0 个 Key。
 
-测试通过意味着**当前硬件与软件环境下的这些测试用例通过**，不代表所有 GPU、形状或 dtype 组合均已验证。若 CUDA 或扩展不可用，部分测试会显示为 skipped；请查看完整 pytest 输出，不要把 skipped 当作 passed。
+测试会将自定义 Kernel 的输出与 **traditional_attention.py** 的显式计算结果进行比较，并使用设定的 atol / rtol 检查数值误差。
+
+如果 CUDA 或扩展不可用，测试可能显示 skipped。请阅读完整的 pytest 结果；skipped 不代表测试通过。
 
 ## 性能对比
 
-### 1. Baseline 定义
+### Baseline 是什么？
 
-本项目将性能 baseline 明确设为 **传统 Attention 显式实现**，而不是调用经过融合优化的 PyTorch SDPA。
+本项目使用传统 Attention 作为性能 baseline，不使用 PyTorch SDPA 作为性能对照。
 
-\`\`\`text
-传统 Attention：
-QKᵀ → scale → Mask（可选）→ Softmax → × V
+| 传统 Attention | 自定义 FlashAttention |
+|---|---|
+| 显式创建完整的注意力分数矩阵 | 分块处理 K/V |
+| 对分数矩阵执行 Softmax | 使用 Online Softmax 更新统计量 |
+| 中间矩阵空间规模随序列长度平方增长 | 不显式保存完整的分数矩阵 |
+| 作为数值参考和性能基线 | 作为待测的 CUDA 实现 |
 
-自定义 FlashAttention：
-分块加载 K/V → 分块分数 → Online Softmax → 累积输出
-\`\`\`
+### 运行基准测试
 
-两种实现使用相同的 Q/K/V 输入、dtype 和因果掩码配置。基准脚本会先比较输出误差，然后分别进行预热与 CUDA Event 计时。
+建议先从较短的序列开始：
 
-### 2. 运行基准测试
-
-推荐先从较短序列开始：
-
-\`\`\`bash
-python benchmarks/benchmark.py \\
-  --seq-lens 128,256,512,1024 \\
-  --batch 1 \\
-  --heads 8 \\
-  --head-dim 64 \\
-  --dtype fp16 \\
-  --causal \\
-  --warmup 10 \\
-  --repeats 50 \\
+~~~bash
+python benchmarks/benchmark.py \
+  --seq-lens 128,256,512,1024 \
+  --batch 1 \
+  --heads 8 \
+  --head-dim 64 \
+  --dtype fp16 \
+  --causal \
+  --warmup 10 \
+  --repeats 50 \
   --output benchmark-results/fp16-causal.json
-\`\`\`
+~~~
 
-如果希望测试非因果模式，移除 \`--causal\` 即可；如果希望使用 FP32，将 \`--dtype fp16\` 改为 \`--dtype fp32\`。也可以直接运行：
+移除 **--causal** 参数可测试非因果模式；将 **--dtype fp16** 改为 **--dtype fp32** 可测试 FP32。
 
-\`\`\`bash
+也可以执行快捷脚本：
+
+~~~bash
 bash scripts/run_benchmark.sh
-\`\`\`
+~~~
 
-输出指标包括：
+基准程序会先比较两种实现的输出误差，再分别预热、使用 CUDA Event 测量平均单次延迟。输出指标如下：
 
 | 指标 | 含义 |
 |---|---|
-| \`traditional_attention_latency_ms\` | 传统 Attention 平均单次延迟 |
-| \`flash_attention_latency_ms\` | 自定义 CUDA Kernel 平均单次延迟 |
-| \`speedup_traditional_over_flash\` | 传统延迟 ÷ 自定义 Kernel 延迟；大于 1 表示本次测量中自定义 Kernel 更快 |
-| \`max_abs_error_vs_traditional\` | 两种实现输出的最大绝对误差 |
-| \`traditional_peak_allocated_delta_bytes\` | 传统实现的峰值 PyTorch 显存分配增量 |
-| \`flash_peak_allocated_delta_bytes\` | 自定义实现的峰值 PyTorch 显存分配增量 |
+| traditional_attention_latency_ms | 传统 Attention 平均单次延迟 |
+| flash_attention_latency_ms | 自定义 CUDA Kernel 平均单次延迟 |
+| speedup_traditional_over_flash | 传统延迟除以自定义 Kernel 延迟；大于 1 表示本次测量中自定义 Kernel 更快 |
+| max_abs_error_vs_traditional | 两种实现输出的最大绝对误差 |
+| traditional_peak_allocated_delta_bytes | 传统实现的峰值 PyTorch 显存分配增量 |
+| flash_peak_allocated_delta_bytes | 自定义实现的峰值 PyTorch 显存分配增量 |
 
-> **长序列注意：** 传统 baseline 会真实物化 \([B,H,S,S]\) 分数矩阵，显存随 \(S^2\) 增长。请逐步增大序列长度；如果发生 CUDA Out of Memory，缩小序列长度或 batch/head 数后再测。
+结果会输出到终端；如果指定了 output 参数，也会保存成 JSON 文件。
 
-显存统计是 PyTorch 统计到的峰值分配增量，不等于进程总显存或设备物理显存。不要把理论矩阵大小直接当作测量结果，也不要在没有运行记录的情况下填写加速比。
+> **显存提醒：** 传统 baseline 会显式分配完整的 [B, H, S, S] 分数矩阵。序列长度越大，显存占用增长越快。建议逐步增加序列长度；出现 CUDA Out of Memory 时，先减小序列长度、batch 或 heads。
 
-### 3. 使用 Nsight 分析
+本项目报告的是 PyTorch 记录到的峰值分配增量，不是整个进程的物理显存占用。不要用理论矩阵大小代替实际测试数据。
 
-查看 Kernel 级性能计数器：
+## 使用 Nsight 分析性能
 
-\`\`\`bash
+使用 Nsight Compute 查看 Kernel 指标：
+
+~~~bash
 ncu --set basic python benchmarks/benchmark.py --seq-lens 256 --batch 1 --heads 2 --head-dim 64 --dtype fp16
-\`\`\`
+~~~
 
-查看 CUDA 调用与系统时间线：
+使用 Nsight Systems 查看调用时间线：
 
-\`\`\`bash
+~~~bash
 nsys profile --stats=true python benchmarks/benchmark.py --seq-lens 256 --batch 1 --heads 2 --head-dim 64 --dtype fp16
-\`\`\`
+~~~
 
-不同版本的 Nsight 可能需要调整参数或权限。建议先完成正确性测试，再进行普通计时，最后单独进行 profiler 分析。
+建议先跑完正确性测试，再记录不带 profiler 的普通延迟，最后单独进行性能剖析。不同版本的 Nsight 可能需要调整参数或权限设置。
 
-## 如何解读显存开销
+## 如何记录结果
 
-单个 Attention Score 矩阵的理论大小为：
+每次实验建议记录：
 
-\[
-\text{Memory}=B\times H\times S^2\times \text{每元素字节数}
-\]
+- GPU 型号、驱动版本、CUDA Toolkit 版本、PyTorch 版本。
+- 输入 dtype、B/H/S/D、是否启用 Causal Mask。
+- pytest 完整输出和测试是否通过。
+- 传统 Attention 延迟、自定义 Kernel 延迟、加速比、最大绝对误差。
+- 两种实现的显存分配数据和 benchmark JSON 文件。
 
-例如，当 \(B=1,H=1,S=4096\) 时，**单个** FP32 分数矩阵理论上约为 64 MiB；FP16 则约为 32 MiB。传统实现还会产生概率矩阵等中间结果，因此实际峰值与这些理论值不同。
+结果表格模板：
 
-FlashAttention 的核心优势是避免保存完整的 \(S\times S\) 注意力分数矩阵，而不是承诺任何环境下都达到固定的显存比例或固定加速比。实际收益应以目标设备上的 profiler 和 benchmark 结果为准。
-
-## 结果记录模板
-
-每次正式测试建议记录 GPU 型号、驱动、CUDA Toolkit、PyTorch 版本、dtype、张量形状、是否启用因果掩码、测试命令、pytest 输出和 benchmark JSON。可以按下面的格式整理结果：
-
-| GPU / 软件环境 | dtype | B/H/S/D | causal | 传统延迟 (ms) | 自定义延迟 (ms) | 加速比 | 最大绝对误差 |
+| GPU / 软件环境 | dtype | B/H/S/D | Causal | 传统延迟 (ms) | 自定义延迟 (ms) | 加速比 | 最大绝对误差 |
 |---|---|---|---|---:|---:|---:|---:|
 | 待实测填写 | FP16 | 1/8/512/64 | 是 | — | — | — | — |
 
-**仓库当前不提供虚构的性能成绩。** 请先在目标 NVIDIA GPU 上运行并保存报告，再把真实结果补充到表格。
+仓库不预填示例加速比。请以实际运行日志和 JSON 报告为准，再将真实结果用于项目总结或简历。
 
-## 已知限制与后续优化方向
+## 已知限制与后续方向
 
-当前版本优先保证代码可读，主要用于理解 Attention 的内存访问、Online Softmax 和 CUDA 扩展开发。它尚不是高性能实现，可能慢于高度优化的库。
+当前版本更偏向教学和验证，可能慢于高度优化的注意力实现。主要限制包括：
 
-后续可以围绕以下方向迭代：
+- 只实现前向计算，不包含反向传播。
+- Q/K/V 必须形状一致且连续。
+- 只支持 FP32 和 FP16，head dimension 最大为 128。
+- 每个 CUDA Block 处理一行 Query，尚未完成充分的并行度与访存优化。
+- 未实现 Dropout、GQA/MQA 等功能。
 
-- 让多个 Warp 协作完成 QK 点积和归约。
-- 一个 CTA 处理多个 Query 行，增加 K/V tile 的复用。
-- 优化全局内存访问、tile 尺寸、寄存器占用和 occupancy。
-- 借助 Nsight 定位访存、计算和 Kernel launch 开销。
-- 在前向正确性稳定后，再扩展反向传播和更多输入形状。
+后续可以尝试多 Query 行分块、Warp 协作归约、向量化访存、tile 尺寸调优，并使用 Nsight 验证每项优化是否真正带来收益。
 
 ## License
 
 本项目采用 [MIT License](LICENSE)。
-
----
-
-<div align="center">
-
-**Learn the algorithm · Inspect the kernel · Measure the result**
-
-[GitHub Repository](https://github.com/FeynmanNddbb/cuda-flash-attention-lite)
-
-</div>
