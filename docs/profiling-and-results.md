@@ -2,8 +2,6 @@
 
 ## 1. Record the environment
 
-Before benchmarking, save this output with the results:
-
     nvidia-smi
     nvcc --version
     python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
@@ -13,6 +11,7 @@ Also record the GPU model, driver version, CUDA Toolkit version, PyTorch version
 ## 2. Run correctness first
 
     python -m pip install -r requirements-test.txt
+    python -m pip install -e . --no-build-isolation
     pytest -v tests
 
 Do not report latency or speedup for a build that has not passed correctness tests. Record any skips: tests skip when CUDA or the compiled extension is unavailable.
@@ -33,7 +32,7 @@ The memory field is peak PyTorch-allocated memory above the baseline during repe
 
 Profiler permissions and option names can vary by installed version. Keep correctness/latency runs separate from heavily instrumented profiler runs.
 
-## Resume/reporting template
+## Result table template
 
 | GPU / software stack | dtype | B/H/S/D | causal | SDPA ms | custom ms | speedup | max absolute error | peak allocation delta |
 |---|---|---|---|---:|---:|---:|---:|---:|
