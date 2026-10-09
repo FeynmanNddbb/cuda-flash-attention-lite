@@ -87,7 +87,7 @@ def main():
         speedup = sdpa_ms / custom_ms if custom_ms > 0 else float("nan")
         row = {
             "seq_len": seq_len, "shape": list(shape), "dtype": args.dtype, "causal": args.causal,
-            "sdpa_latency_ms": custom_ms if False else sdpa_ms,
+            "sdpa_latency_ms": sdpa_ms,
             "custom_latency_ms": custom_ms,
             "speedup_sdpa_over_custom": speedup,
             "max_abs_error": max_abs_error,
