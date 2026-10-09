@@ -23,13 +23,15 @@ def traditional_attention(
     if q.dtype != k.dtype or q.dtype != v.dtype:
         raise ValueError("q, k, and v must share a dtype")
 
-    scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(q.size(-1))
+    # Explicitly materialize the complete sequence-by-sequence score matrix.
+    scores = torch.matmul(q, k.transpose(-2, -1))
+    scores.mul_(1.0 / math.sqrt(q.size(-1)))
     if causal:
         seq_len = q.size(-2)
         mask = torch.triu(
             torch.ones((seq_len, seq_len), device=q.device, dtype=torch.bool),
             diagonal=1,
         )
-        scores = scores.masked_fill(mask, float("-inf"))
+        scores.masked_fill_(mask, float("-inf"))
     probabilities = torch.softmax(scores, dim=-1)
     return torch.matmul(probabilities, v)
