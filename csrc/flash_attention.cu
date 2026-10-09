@@ -2,6 +2,7 @@
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
+#include <cuda_runtime.h>
 
 constexpr int kTile = 32;
 constexpr int kMaxHeadDim = 128;
@@ -114,10 +115,16 @@ void launch_flash_attention_cuda(const torch::Tensor& q, const torch::Tensor& k,
   const dim3 block(kThreads);
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "flash_attention_forward_cuda", [&] {
-    flash_attention_forward_kernel<scalar_t><<<grid, block, 0, stream>>>(
-        q.data_ptr<scalar_t>(), k.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(),
-        out.data_ptr<scalar_t>(), batch_heads, seq_len, head_dim, causal);
-  });
+  // Only instantiate FP32 and FP16 kernels. The C++ binding rejects all other
+  // dtypes, and avoiding a double specialization also avoids excess shared memory.
+  if (q.scalar_type() == at::kFloat) {
+    flash_attention_forward_kernel<float><<<grid, block, 0, stream>>>(
+        q.data_ptr<float>(), k.data_ptr<float>(), v.data_ptr<float>(),
+        out.data_ptr<float>(), batch_heads, seq_len, head_dim, causal);
+  } else {
+    flash_attention_forward_kernel<at::Half><<<grid, block, 0, stream>>>(
+        q.data_ptr<at::Half>(), k.data_ptr<at::Half>(), v.data_ptr<at::Half>(),
+        out.data_ptr<at::Half>(), batch_heads, seq_len, head_dim, causal);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
