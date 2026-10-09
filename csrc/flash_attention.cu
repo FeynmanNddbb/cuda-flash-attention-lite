@@ -9,9 +9,8 @@ constexpr int kMaxHeadDim = 128;
 constexpr int kThreads = 128;
 
 // Educational baseline: one CTA owns one query row. Threads cooperatively load
-// a K/V tile to shared memory and compute one score per key. Thread 0 performs
-// the online-softmax update and writes the output row. Clarity is prioritized
-// over production-level occupancy and parallelism.
+// K/V tiles to shared memory. Thread 0 updates online-softmax row statistics;
+// threads then update separate output dimensions in parallel.
 template <typename scalar_t>
 __global__ void flash_attention_forward_kernel(
     const scalar_t* __restrict__ q, const scalar_t* __restrict__ k,
@@ -30,14 +29,15 @@ __global__ void flash_attention_forward_kernel(
   __shared__ scalar_t shared_k[kTile * kMaxHeadDim];
   __shared__ scalar_t shared_v[kTile * kMaxHeadDim];
   __shared__ float scores[kTile];
-  __shared__ float out_acc[kMaxHeadDim];
+  __shared__ float probabilities[kTile];
   __shared__ float running_max;
   __shared__ float running_sum;
+  __shared__ float alpha_shared;
 
+  float output_acc = 0.0f;
   if (threadIdx.x == 0) {
     running_max = -CUDART_INF_F;
     running_sum = 0.0f;
-    for (int d = 0; d < head_dim; ++d) out_acc[d] = 0.0f;
   }
   __syncthreads();
   const float scale = rsqrtf(static_cast<float>(head_dim));
@@ -59,6 +59,7 @@ __global__ void flash_attention_forward_kernel(
     }
     __syncthreads();
 
+    // One thread computes each key score using FP32 accumulation.
     for (int local_key = threadIdx.x; local_key < kTile; local_key += blockDim.x) {
       const int key_index = tile_start + local_key;
       if (key_index >= seq_len || (causal && key_index > query_index)) {
@@ -74,35 +75,39 @@ __global__ void flash_attention_forward_kernel(
     }
     __syncthreads();
 
+    // Thread 0 computes stable softmax weights and updates the denominator.
     if (threadIdx.x == 0) {
       float tile_max = -CUDART_INF_F;
       for (int j = 0; j < kTile; ++j) tile_max = fmaxf(tile_max, scores[j]);
       const float new_max = fmaxf(running_max, tile_max);
-      const float alpha = isfinite(running_max) ? __expf(running_max - new_max) : 0.0f;
-      float probabilities[kTile];
+      alpha_shared = isfinite(running_max) ? __expf(running_max - new_max) : 0.0f;
+
       float tile_sum = 0.0f;
       for (int j = 0; j < kTile; ++j) {
         probabilities[j] = isfinite(scores[j]) ? __expf(scores[j] - new_max) : 0.0f;
         tile_sum += probabilities[j];
       }
-      for (int d = 0; d < head_dim; ++d) {
-        float weighted_value = 0.0f;
-        for (int j = 0; j < kTile; ++j) {
-          weighted_value += probabilities[j] * static_cast<float>(shared_v[j * kMaxHeadDim + d]);
-        }
-        out_acc[d] = alpha * out_acc[d] + weighted_value;
-      }
-      running_sum = alpha * running_sum + tile_sum;
+      running_sum = alpha_shared * running_sum + tile_sum;
       running_max = new_max;
+    }
+    __syncthreads();
+
+    // Parallelize the value-weighted update over output dimensions.
+    if (threadIdx.x < head_dim) {
+      const int d = threadIdx.x;
+      float weighted_value = 0.0f;
+      for (int j = 0; j < kTile; ++j) {
+        weighted_value += probabilities[j] *
+            static_cast<float>(shared_v[j * kMaxHeadDim + d]);
+      }
+      output_acc = alpha_shared * output_acc + weighted_value;
     }
     __syncthreads();
   }
 
-  if (threadIdx.x == 0) {
-    for (int d = 0; d < head_dim; ++d) {
-      const float value = running_sum > 0.0f ? out_acc[d] / running_sum : 0.0f;
-      out_row[d] = static_cast<scalar_t>(value);
-    }
+  if (threadIdx.x < head_dim) {
+    const float result = running_sum > 0.0f ? output_acc / running_sum : 0.0f;
+    out_row[threadIdx.x] = static_cast<scalar_t>(result);
   }
 }
 
@@ -115,8 +120,7 @@ void launch_flash_attention_cuda(const torch::Tensor& q, const torch::Tensor& k,
   const dim3 block(kThreads);
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(q.get_device());
 
-  // Only instantiate FP32 and FP16 kernels. The C++ binding rejects all other
-  // dtypes, and avoiding a double specialization also avoids excess shared memory.
+  // Only instantiate FP32 and FP16 kernels; the binding rejects other dtypes.
   if (q.scalar_type() == at::kFloat) {
     flash_attention_forward_kernel<float><<<grid, block, 0, stream>>>(
         q.data_ptr<float>(), k.data_ptr<float>(), v.data_ptr<float>(),
