@@ -24,9 +24,9 @@ For one query row, let the state after previously processed tiles be maximum m, 
 
 The final output is o/l. Initially m=-infinity, l=0, and o=0. Masked and out-of-range keys receive negative-infinity scores and zero probability.
 
-## Numerical behavior
+## Numerical behavior and validation
 
-Input values are cast to FP32 for dot products and updates; the result is cast back to the input dtype. Results need not be bitwise identical to SDPA because floating-point reductions and fused kernels may use different operation orders. Test tolerances are starting points and must be validated on the target architecture and PyTorch version.
+Input values are cast to FP32 for custom-kernel dot products and online-softmax updates; the result is cast back to the input dtype. The conventional reference calculates QK^T, scales it, optionally applies a causal mask, runs softmax, and multiplies the result by V. Floating-point reductions may differ in operation order, so tests use dtype-appropriate tolerances rather than requiring bitwise identity.
 
 ## Further optimization ideas
 
