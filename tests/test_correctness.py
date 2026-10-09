@@ -1,9 +1,9 @@
 import pytest
 import torch
-import torch.nn.functional as F
 
 from conftest import requires_cuda_extension
 from flash_attention import flash_attention
+from traditional_attention import traditional_attention
 
 
 @pytest.mark.parametrize("dtype,atol,rtol", [
@@ -13,11 +13,14 @@ from flash_attention import flash_attention
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("shape", [(1, 2, 17, 32), (1, 2, 64, 64)])
 @requires_cuda_extension
-def test_matches_torch_sdpa(dtype, atol, rtol, causal, shape):
+def test_matches_traditional_attention(dtype, atol, rtol, causal, shape):
     torch.manual_seed(2026)
-    q, k, v = [torch.randn(shape, device="cuda", dtype=dtype).contiguous() for _ in range(3)]
+    q, k, v = [
+        torch.randn(shape, device="cuda", dtype=dtype).contiguous()
+        for _ in range(3)
+    ]
     actual = flash_attention(q, k, v, causal=causal)
-    expected = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=causal)
+    expected = traditional_attention(q, k, v, causal=causal)
     assert actual.shape == expected.shape
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
