@@ -50,13 +50,13 @@ def measure(fn, q, k, v, warmup, repeats):
     end = torch.cuda.Event(enable_timing=True)
     start.record()
     for _ in range(repeats):
-        out = fn(q, k, v)
+        result = fn(q, k, v)
+        del result
     end.record()
     torch.cuda.synchronize()
 
     latency_ms = start.elapsed_time(end) / repeats
     peak_delta_bytes = max(0, torch.cuda.max_memory_allocated() - baseline_bytes)
-    del out
     return latency_ms, peak_delta_bytes
 
 
