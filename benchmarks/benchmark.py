@@ -40,8 +40,8 @@ def parse_args():
 
 def measure(fn, q, k, v, warmup, repeats):
     for _ in range(warmup):
-        out = fn(q, k, v)
-    del out
+        result = fn(q, k, v)
+        del result
     torch.cuda.synchronize()
 
     baseline_bytes = torch.cuda.memory_allocated()
