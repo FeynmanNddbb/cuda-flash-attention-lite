@@ -13,6 +13,6 @@ jobs:
         with:
           python-version: "3.11"
       - name: Compile Python sources
-        run: python -m compileall -q flash_attention.py benchmarks tests
+        run: python -m compileall -q flash_attention.py traditional_attention.py benchmarks tests
       - name: Validate shell syntax
         run: bash -n scripts/run_tests.sh scripts/run_benchmark.sh
