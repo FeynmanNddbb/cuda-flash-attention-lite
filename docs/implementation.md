@@ -10,7 +10,7 @@ The QK scale is 1/sqrt(D). Causal masking uses the inclusive lower triangle: que
 
 Each CUDA block owns one query row. The block stages at most 32 K and V rows in shared memory, with a fixed shared-memory stride of 128 elements per row. Threads cooperatively load the K/V tile. The first 32 threads calculate scores, one score per key, using FP32 accumulation.
 
-This design makes the data movement visible and keeps the control flow approachable. It is intentionally not an optimized implementation: score dot products and the online output update contain serial loops, and only thread 0 updates the row output accumulator. Production kernels parallelize work across query rows/features, optimize memory transactions, and may use architecture-specific matrix instructions.
+Thread 0 updates the online-softmax maximum, normalization sum, and probabilities for the tile. Once those weights are ready, threads update different output dimensions in parallel. This keeps the row update parallel while making the online-softmax recurrence readable. The score dot product still loops over D per key and each CTA handles only one query row, so this is an educational baseline rather than a production kernel.
 
 ## Online softmax
 
@@ -30,7 +30,7 @@ Input values are cast to FP32 for dot products and updates; the result is cast b
 
 ## Further optimization ideas
 
-1. Let warps cooperate on QK dot products and parallelize the output-feature update.
+1. Let warps cooperate on QK dot products and parallelize reductions over D.
 2. Process multiple query rows per CTA to amortize K/V loads.
 3. Use vectorized global memory access and tune tile sizes.
 4. Tune launch geometry and inspect registers, occupancy, and shared-memory pressure with Nsight Compute.
